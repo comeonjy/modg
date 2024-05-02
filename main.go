@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"errors"
 	"fmt"
 	"go/ast"
@@ -20,47 +21,62 @@ type PackageTree struct {
 }
 
 func main() {
-	fileList := []string{
-		//"doc/swagger/main.go",
-		//"engine/agent-service/Makefile",
-		"engine/agent-service/app/api/agent.go",
-		//"engine/agent-service/docs/.gitkeep",
-		//"engine/agent-service/docs/docs.go",
-		//"engine/agent-service/docs/swagger.js",
+	// 项目根目录绝对路径
+	projectDir := "/Users/jiangyang/project/pone"
+
+	// 项目根目录下被修改文件的相对路径
+	changeFileList := []string{
+		"rpc/user/userclient/user.pb.go",
 	}
-	projectName := "gaea"
-	dir := "/Users/jiangyang/tr/gaea"
-	packageTreeRoot := &PackageTree{PackageName: projectName, FilePath: dir, Children: make([]*PackageTree, 0)}
-	if err := packageTreeRoot.Add(dir); err != nil {
+
+	projectName, err := GetModuleName(projectDir)
+	if err != nil {
 		fmt.Println(err)
 		return
 	}
-	//packageTreeRoot.Print()
 
-	// 找出fileList影响的服务
+	packageTreeRoot := &PackageTree{PackageName: projectName, FilePath: projectDir, Children: make([]*PackageTree, 0)}
+	if err := packageTreeRoot.Add(projectDir); err != nil {
+		fmt.Println(err)
+		return
+	}
+
+	packageTreeRoot.Print()
+	checkList := Check(packageTreeRoot, changeFileList, projectName)
+	fmt.Println("受影响的服务：", checkList)
+
+}
+
+// Check 找出fileList影响的服务
+func Check(packageTreeRoot *PackageTree, fileList []string, projectName string) map[string]struct{} {
+	packagesMap := make(map[string]struct{})
 	for _, v := range fileList {
 		if strings.HasSuffix(v, "_test.go") || !strings.HasSuffix(v, ".go") {
 			continue
 		}
-		fmt.Println(v, packageTreeRoot.Find(fmt.Sprintf("%s/%s", projectName, path.Dir(v))))
+		packages := packageTreeRoot.Find(packageTreeRoot, fmt.Sprintf("%s/%s", projectName, path.Dir(v)))
+		for _, packagePath := range packages {
+			packagesMap[packagePath] = struct{}{}
+		}
 	}
-
+	return packagesMap
 }
 
-func (t *PackageTree) Find(packageName string) []string {
-	fmt.Println(packageName)
+// Find 查找文件对应
+func (t *PackageTree) Find(packageTreeRoot *PackageTree, packageName string) []string {
 	affectedPackages := make([]string, 0)
 	for _, v := range t.Imports {
 		if v == packageName {
 			if t.PackageName != "main" {
-				affectedPackage := t.Find(strings.Split(t.FilePath, "gaea")[1])
+				affectedPackage := packageTreeRoot.Find(packageTreeRoot, fmt.Sprintf("%s%s", packageTreeRoot.PackageName, strings.TrimPrefix(t.FilePath, packageTreeRoot.FilePath)))
 				affectedPackages = append(affectedPackages, affectedPackage...)
+			} else {
+				affectedPackages = append(affectedPackages, t.FilePath)
 			}
-			affectedPackages = append(affectedPackages, t.FilePath)
 		}
 	}
 	for _, v := range t.Children {
-		affectedPackage := v.Find(packageName)
+		affectedPackage := v.Find(packageTreeRoot, packageName)
 		affectedPackages = append(affectedPackages, affectedPackage...)
 	}
 	return affectedPackages
@@ -109,6 +125,26 @@ func (t *PackageTree) Add(dir string) error {
 	return nil
 }
 
+var commendRegex = regexp.MustCompile(`^\s*//`)
+var moduleRegex = regexp.MustCompile(`^\s*module\s+(\w+)`)
+
+func GetModuleName(projectDir string) (string, error) {
+	file, err := os.Open(fmt.Sprintf("%s/go.mod", projectDir))
+	if err != nil {
+		return "", err
+	}
+	buf := bufio.NewScanner(file)
+	for buf.Scan() {
+		if commendRegex.Match(buf.Bytes()) {
+			continue
+		}
+		if match := moduleRegex.FindStringSubmatch(buf.Text()); len(match) > 1 && len(match[1]) > 0 {
+			return match[1], nil
+		}
+	}
+	return "", errors.New("module name not find")
+}
+
 var goBuildIgnoreRegex = regexp.MustCompile(`^//(go:build\s+.*|\s*\+build\s+.*)\s*$`)
 
 func ParseFileList(filenames []string) (string, []string, error) {
@@ -130,7 +166,7 @@ func ParseFileList(filenames []string) (string, []string, error) {
 		packageName = file.Name.Name
 		for _, v := range file.Imports {
 			if _, ok := importsMap[v.Path.Value]; !ok {
-				imports = append(imports, v.Path.Value)
+				imports = append(imports, strings.Trim(v.Path.Value, `"`))
 				importsMap[v.Path.Value] = struct{}{}
 			}
 		}
